@@ -18,3 +18,4 @@ web/*.wasm
 *.bc
 *.a
 *.o.tmp
+*_libretro_emscripten.wasm

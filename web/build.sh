@@ -7,7 +7,7 @@
 set -e
 cd "$(dirname "$0")/.."
 
-EMCC="$(pwd)/../RetroSpartan/emsdk/upstream/emscripten/emcc.exe"
+EMCC="$(pwd)/../emsdk/upstream/emscripten/emcc.exe"
 
 "$EMCC" \
   web/wrapper.c saturn.a \

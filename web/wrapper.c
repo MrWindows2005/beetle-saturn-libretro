@@ -1,0 +1,266 @@
+// Emscripten-facing wrapper around Beetle Saturn (Mednafen's SS core, this
+// fork's libretro.c) -- pure software rendering (no RETRO_ENVIRONMENT_
+// SET_HW_RENDER anywhere in this core, unlike Dreamcast/Flycast), so this
+// follows the exact same shape as pcsx_rearmed/web/wrapper.c: video_refresh_cb
+// converts the core's own pixel format straight into an RGBA8888 buffer,
+// exposed through the same <prefix>_framebuffer_ptr/_width/_height/_len
+// convention every other core in this project already uses.
+//
+// Unlike PS1/Dreamcast, Saturn has NO HLE BIOS option at all -- a real
+// region-specific BIOS dump is mandatory (see mednafen/ss/ss.c's bios_
+// filename selection: "sega_101.bin" for Japan, "mpr-17933.bin" for
+// everything else). The actual region is auto-detected from the disc
+// itself (beetle_saturn_region core var left unanswered -> setting_region
+// stays 0/"auto"), so at BIOS-upload time we don't yet know which of the
+// two filenames the loaded disc will resolve to -- write the same
+// uploaded bytes to BOTH paths, same "cover every plausible path" pattern
+// already used for Sega CD's region-triplicated BIOS (Genesis-Plus-GX/
+// web/wrapper_cd.c's gpgx_load_bios()).
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <emscripten.h>
+#include "libretro.h"
+
+static retro_environment_t environ_cb;
+static retro_video_refresh_t video_cb;
+static retro_audio_sample_t audio_sample_cb;
+static retro_audio_sample_batch_t audio_batch_cb;
+static retro_input_poll_t input_poll_cb;
+static retro_input_state_t input_state_cb;
+
+/* ---- Video: fixed XRGB8888 (see retro_load_game's SET_PIXEL_FORMAT) ---- */
+#define FB_MAX_W 704
+#define FB_MAX_H 576
+static uint32_t out_rgba[FB_MAX_W * FB_MAX_H];
+static int out_w = 320, out_h = 240;
+
+static void video_refresh_cb_fn(const void *data, unsigned width, unsigned height, size_t pitch)
+{
+	int x, y;
+	if (!data)
+		return; /* duped frame -- nothing to convert */
+	if (width > FB_MAX_W) width = FB_MAX_W;
+	if (height > FB_MAX_H) height = FB_MAX_H;
+
+	for (y = 0; y < (int)height; y++)
+	{
+		const uint32_t *src_row = (const uint32_t *)((const uint8_t *)data + y * pitch);
+		uint32_t *dst_row = out_rgba + y * width;
+		for (x = 0; x < (int)width; x++)
+		{
+			uint32_t p = src_row[x];
+			uint32_t r = (p >> 16) & 0xff, g = (p >> 8) & 0xff, b = p & 0xff;
+			dst_row[x] = r | (g << 8) | (b << 16) | (0xffu << 24);
+		}
+	}
+	out_w = (int)width;
+	out_h = (int)height;
+}
+
+/* ---- Audio -------------------------------------------------------------- */
+#define AUDIO_MAX_FRAMES 16384
+static int16_t audio_buffer[AUDIO_MAX_FRAMES * 2];
+static int audio_frames = 0;
+
+static size_t audio_sample_batch_cb_fn(const int16_t *data, size_t frames)
+{
+	size_t room = AUDIO_MAX_FRAMES - audio_frames;
+	size_t n = frames < room ? frames : room;
+	memcpy(audio_buffer + audio_frames * 2, data, n * 2 * sizeof(int16_t));
+	audio_frames += (int)n;
+	return frames;
+}
+
+static void audio_sample_cb_fn(int16_t left, int16_t right)
+{
+	if (audio_frames >= AUDIO_MAX_FRAMES)
+		return;
+	audio_buffer[audio_frames * 2] = left;
+	audio_buffer[audio_frames * 2 + 1] = right;
+	audio_frames++;
+}
+
+/* ---- Input: standard RETRO_DEVICE_ID_JOYPAD_* order (same as every other
+ * wrapper's LIBRETRO_JOYPAD-shaped table -- see input.c's own button
+ * remap tables, which all read from these same libretro IDs regardless of
+ * which physical Saturn pad button they land on). Only 2 ports driven
+ * from JS for now, matching PS1/Dreamcast's own scope cut. */
+static int16_t joypad_state[8][16];
+
+static void input_poll_cb_fn(void) {}
+
+static int16_t input_state_cb_fn(unsigned port, unsigned device, unsigned index, unsigned id)
+{
+	(void)index;
+	if (port > 7)
+		return 0;
+	if (device == RETRO_DEVICE_JOYPAD)
+		return id < 16 ? joypad_state[port][id] : 0;
+	return 0;
+}
+
+/* ---- Logging: this fork's own log_cb already defaults to a real
+ * fallback_log (libretro.c line ~77), so -- unlike Flycast -- refusing
+ * GET_LOG_INTERFACE here is safe and doesn't crash on the first log call. */
+
+/* libretro-common/time/rtime.c's retro_sleep()/retro_sleep_us() are ONLY
+ * implemented for _WIN32 (the whole file is one big #if defined(_WIN32)
+ * block with no #else) -- genuinely missing for every non-Windows target
+ * in this vendored snapshot, not something specific to us. Called from
+ * mednafen/ss/vdp2_render.c's VDP2 render-thread queue backpressure spin
+ * (see VDP2REND_EndFrame()/WWQ_Push()). emscripten_sleep() needs Asyncify
+ * (not used here) to actually yield without blocking the whole runtime, so
+ * this uses pthread's own real usleep() instead, valid since this build
+ * targets pthreads (see the Makefile's emscripten platform block). */
+#include <unistd.h>
+void retro_sleep(unsigned msec) { usleep((useconds_t)msec * 1000); }
+void retro_sleep_us(unsigned usec) { usleep((useconds_t)usec); }
+
+static bool environment_cb_fn(unsigned cmd, void *data)
+{
+	switch (cmd)
+	{
+	case RETRO_ENVIRONMENT_GET_CAN_DUPE:
+		*(bool *)data = true;
+		return true;
+	case RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY:
+	case RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY:
+		*(const char **)data = "/system";
+		return true;
+	case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT:
+		/* Only XRGB8888 is ever requested (see retro_load_game) -- accept
+		 * unconditionally; refusing this would abort loading entirely. */
+		return true;
+	case RETRO_ENVIRONMENT_GET_VARIABLE:
+	{
+		/* Leaving every beetle_saturn_* option unanswered falls through to
+		 * this fork's own compiled-in defaults (var.value already starts
+		 * NULL'd by libretro.c before each of these calls) -- region stays
+		 * "auto" (detected from the disc itself), which is exactly the
+		 * real-hardware behavior we want, not something to override. */
+		return false;
+	}
+	case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
+		*(bool *)data = false;
+		return true;
+	case RETRO_ENVIRONMENT_SET_VARIABLES:
+	case RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS:
+	case RETRO_ENVIRONMENT_SET_GEOMETRY:
+	case RETRO_ENVIRONMENT_SET_MESSAGE:
+	case RETRO_ENVIRONMENT_SET_CORE_OPTIONS:
+	case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_INTL:
+		return true;
+	default:
+		return false;
+	}
+}
+
+EMSCRIPTEN_KEEPALIVE
+int saturn_init(void)
+{
+	memset(joypad_state, 0, sizeof(joypad_state));
+	EM_ASM({ FS.mkdirTree('/system'); });
+
+	retro_set_environment(environment_cb_fn);
+	retro_init();
+	retro_set_video_refresh(video_refresh_cb_fn);
+	retro_set_audio_sample(audio_sample_cb_fn);
+	retro_set_audio_sample_batch(audio_sample_batch_cb_fn);
+	retro_set_input_poll(input_poll_cb_fn);
+	retro_set_input_state(input_state_cb_fn);
+	return 1;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void saturn_load_bios(const uint8_t *data, int size)
+{
+	FILE *f;
+	f = fopen("/system/sega_101.bin", "wb");
+	if (f) { fwrite(data, 1, size, f); fclose(f); }
+	f = fopen("/system/mpr-17933.bin", "wb");
+	if (f) { fwrite(data, 1, size, f); fclose(f); }
+}
+
+EMSCRIPTEN_KEEPALIVE
+int saturn_load_cd(const char *path)
+{
+	struct retro_game_info info;
+	memset(&info, 0, sizeof(info));
+	info.path = path;
+	info.data = NULL;
+	info.size = 0;
+	return retro_load_game(&info) ? 1 : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void saturn_run_frame(void)
+{
+	audio_frames = 0;
+	retro_run();
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t *saturn_framebuffer_ptr(void) { return out_rgba; }
+
+EMSCRIPTEN_KEEPALIVE
+int saturn_framebuffer_width(void) { return out_w; }
+
+EMSCRIPTEN_KEEPALIVE
+int saturn_framebuffer_height(void) { return out_h; }
+
+EMSCRIPTEN_KEEPALIVE
+int saturn_framebuffer_len(void) { return out_w * out_h * 4; }
+
+EMSCRIPTEN_KEEPALIVE
+int16_t *saturn_audio_ptr(void) { return audio_buffer; }
+
+EMSCRIPTEN_KEEPALIVE
+int saturn_audio_samples(void) { return audio_frames; }
+
+EMSCRIPTEN_KEEPALIVE
+void saturn_set_button(int player, int button, int pressed)
+{
+	if (player < 0 || player >= 8 || button < 0 || button >= 16)
+		return;
+	joypad_state[player][button] = pressed ? 1 : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int saturn_state_size(void) { return (int)retro_serialize_size(); }
+
+EMSCRIPTEN_KEEPALIVE
+int saturn_state_save(uint8_t *buf, int size) { return retro_serialize(buf, size) ? 1 : 0; }
+
+EMSCRIPTEN_KEEPALIVE
+int saturn_state_load(const uint8_t *buf, int size) { return retro_unserialize(buf, size) ? 1 : 0; }
+
+EMSCRIPTEN_KEEPALIVE
+int saturn_sram_size(void) { return (int)retro_get_memory_size(RETRO_MEMORY_SAVE_RAM); }
+
+EMSCRIPTEN_KEEPALIVE
+int saturn_sram_get(uint8_t *buf, int size)
+{
+	void *data = retro_get_memory_data(RETRO_MEMORY_SAVE_RAM);
+	int real_size = (int)retro_get_memory_size(RETRO_MEMORY_SAVE_RAM);
+	int n;
+	if (!data || real_size <= 0)
+		return 0;
+	n = real_size < size ? real_size : size;
+	memcpy(buf, data, n);
+	return n;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int saturn_sram_set(const uint8_t *buf, int size)
+{
+	void *data = retro_get_memory_data(RETRO_MEMORY_SAVE_RAM);
+	int real_size = (int)retro_get_memory_size(RETRO_MEMORY_SAVE_RAM);
+	int n;
+	if (!data || real_size <= 0)
+		return 0;
+	n = real_size < size ? real_size : size;
+	memcpy(data, buf, n);
+	return 1;
+}

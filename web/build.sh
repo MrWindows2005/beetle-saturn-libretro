@@ -19,11 +19,12 @@ MD_DIR="$(pwd)/../MegaDriveMode"
 "$EMCC" \
   web/wrapper.c saturn.a \
   "$MD_DIR/core/m68k/m68kcpu.c" \
+  "$MD_DIR/core/z80/z80.c" \
   "$MD_DIR/core/audio/ym3438.c" "$MD_DIR/core/audio/sn76496.c" \
   "$MD_DIR/core/vdp/vdp.c" \
   "$MD_DIR/core/core.c" \
   -I libretro-common/include \
-  -I "$MD_DIR/core" -I "$MD_DIR/core/m68k" -I "$MD_DIR/core/audio" -I "$MD_DIR/core/vdp" \
+  -I "$MD_DIR/core" -I "$MD_DIR/core/m68k" -I "$MD_DIR/core/z80" -I "$MD_DIR/core/audio" -I "$MD_DIR/core/vdp" \
   -DHAVE_YM3438_CORE \
   -O2 -pthread \
   -sWASM=1 -sMODULARIZE=1 -sEXPORT_ES6=1 -sALLOW_MEMORY_GROWTH=1 \

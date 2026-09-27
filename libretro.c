@@ -60,15 +60,29 @@
  * directory (not inside this submodule) so this custom work stays out
  * of beetle-saturn-libretro's own upstream history -- see that
  * project's own core/core.c header comment for what it does and does
- * not implement yet (no VDP, no Z80). */
+ * not implement yet (no Z80).
+ *
+ * This mode reuses this core's own real infrastructure rather than
+ * bypassing it: video renders into the same real "surf" MDFN_Surface
+ * every Saturn frame uses (alloc_surface() below), audio writes into
+ * the same real IBuffer global Saturn's own Emulate() fills (so the
+ * exact same audio_batch_cb call at the bottom of retro_run() works
+ * unchanged for both modes), and save states go through the exact same
+ * retro_serialize/MDFNSS_SaveSM path -- see mednafen/ss/ss.c's own
+ * LibRetro_StateAction() for the real branch that adds this mode's own
+ * state alongside Saturn's. system_mode_megadrive is deliberately not
+ * "static" so that function can check it. */
+#include "vdp/vdp.h"
 extern void md_init(void);
 extern void md_load_rom(const unsigned char *data, int size);
 extern void md_reset(void);
 extern void md_run_frame(void);
 extern int md_generate_audio(void);
 extern short *md_audio_ptr(void);
+extern unsigned int *md_framebuffer_ptr(int *width, int *height);
+extern int md_get_state_regions(VdpStateRegion *out, int max);
 
-static bool system_mode_megadrive = false;
+bool system_mode_megadrive = false;
 
 #define MEDNAFEN_CORE_NAME                   "Beetle Saturn"
 #define MEDNAFEN_CORE_VERSION                "v1.32.1"
@@ -1276,6 +1290,16 @@ bool retro_load_game(const struct retro_game_info *info)
       md_load_rom(rom_data, rom_size);
       md_reset();
       free(file_buf);
+
+      /* Real reuse, not a bypass: the same surface Saturn's own
+       * Emulate() writes into, allocated the same way. */
+      alloc_surface();
+      frame_count = 0;
+      cur_width = 0;
+      cur_height = 0;
+      game_width = 0;
+      game_height = 0;
+
       return true;
    }
 
@@ -1388,31 +1412,64 @@ void retro_unload_game(void)
 // MDFN_MidSync below for the full rationale.
 static bool current_frame_is_sim = false;
 
-/* Real Genesis H40/NTSC geometry (320x224) -- placeholder-black since
- * this mode has no VDP yet (see the core option's own comment). Static
- * so it's only zeroed once, not re-cleared every single frame. */
-#define MEGADRIVE_PLACEHOLDER_W 320
-#define MEGADRIVE_PLACEHOLDER_H 224
-static uint32_t megadrive_placeholder_fb[MEGADRIVE_PLACEHOLDER_W * MEGADRIVE_PLACEHOLDER_H];
+/* Real Genesis H40/NTSC geometry -- this mode's own real, fixed frame
+ * size (see core/vdp/vdp.c's own header comment on its still-reduced
+ * rendering scope: Plane A only, no scroll/Plane B/sprites yet, but a
+ * real picture, not a placeholder). */
+#define MEGADRIVE_FB_W 320
+#define MEGADRIVE_FB_H 224
 
 void retro_run(void)
 {
    if (system_mode_megadrive)
    {
+      int fbw, fbh, i;
+      unsigned int *px;
       short *audio;
       int n;
 
       input_poll_cb();
+      if (libretro_supports_bitmasks)
+         input_update_with_bitmasks(input_state_cb);
+      else
+         input_update(input_state_cb);
 
       md_run_frame();
-      n = md_generate_audio();
-      audio = md_audio_ptr();
-      if (audio_batch_cb)
-         audio_batch_cb(audio, n);
+
+      /* Real reuse, not a bypass: render into the exact same surface
+       * Saturn's own Emulate() writes into (see this file's own header
+       * comment on this mode for why). */
+      px = md_framebuffer_ptr(&fbw, &fbh);
+      for (i = 0; i < fbh; i++)
+         memcpy(surf->pixels + (size_t)i * surf->pitchinpix,
+               px + (size_t)i * fbw, (size_t)fbw * sizeof(uint32_t));
+
+      if (fbw != (int)game_width || fbh != (int)game_height)
+      {
+         struct retro_system_av_info av_info;
+         av_info.geometry.base_width   = fbw;
+         av_info.geometry.base_height  = fbh;
+         av_info.geometry.max_width    = MEDNAFEN_CORE_GEOMETRY_MAX_W;
+         av_info.geometry.max_height   = MEDNAFEN_CORE_GEOMETRY_MAX_H;
+         av_info.geometry.aspect_ratio = 4.0f / 3.0f;
+         environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &av_info);
+         game_width  = fbw;
+         game_height = fbh;
+      }
 
       if (video_cb)
-         video_cb(megadrive_placeholder_fb, MEGADRIVE_PLACEHOLDER_W,
-               MEGADRIVE_PLACEHOLDER_H, MEGADRIVE_PLACEHOLDER_W * sizeof(uint32_t));
+         video_cb(surf->pixels, fbw, fbh, (size_t)surf->pitchinpix * sizeof(uint32_t));
+
+      /* Real reuse: the same IBuffer global + audio_batch_cb call
+       * Saturn's own Emulate() output feeds -- both this mode's own
+       * samples and IBuffer are plain interleaved L/R int16 frames, so
+       * this is a straight copy, no format conversion. */
+      n = md_generate_audio();
+      audio = md_audio_ptr();
+      memcpy(IBuffer, audio, (size_t)n * 2 * sizeof(int16_t));
+      if (audio_batch_cb)
+         audio_batch_cb((int16_t*)&IBuffer, n);
+
       return;
    }
 
@@ -1656,13 +1713,11 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
 
    if (system_mode_megadrive)
    {
-      /* Real Genesis NTSC H40 geometry/rate -- see retro_run's own
-       * placeholder-framebuffer comment for why there's no real picture
-       * yet even though the geometry itself is real. */
-      info->geometry.base_width  = MEGADRIVE_PLACEHOLDER_W;
-      info->geometry.base_height = MEGADRIVE_PLACEHOLDER_H;
-      info->geometry.max_width   = MEGADRIVE_PLACEHOLDER_W;
-      info->geometry.max_height  = MEGADRIVE_PLACEHOLDER_H;
+      /* Real Genesis NTSC H40 geometry/rate. */
+      info->geometry.base_width  = MEGADRIVE_FB_W;
+      info->geometry.base_height = MEGADRIVE_FB_H;
+      info->geometry.max_width   = MEDNAFEN_CORE_GEOMETRY_MAX_W;
+      info->geometry.max_height  = MEDNAFEN_CORE_GEOMETRY_MAX_H;
       info->geometry.aspect_ratio = 4.0f / 3.0f;
       info->timing.fps = 59.922743862;  /* real NTSC Genesis frame rate */
       return;

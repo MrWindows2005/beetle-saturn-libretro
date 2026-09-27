@@ -2487,8 +2487,37 @@ extern int64_t       UpdateInputLastBigTS;
 extern int32_t       SH7095_mem_timestamp;
 extern uint32_t      SH7095_BusLock;
 
+/* "Modo Mega Drive" (see libretro.c's own header comment on this mode
+ * for the full picture): a completely separate emulated system that
+ * shares only this one real save-state entry point with Saturn below.
+ * MegaDriveMode's own core stays a plain, portable C module with no
+ * awareness of Mednafen's own SFORMAT/StateMem machinery (it's reused
+ * as-is by a native test harness and a standalone WASM build, neither
+ * of which have or want save states); it just hands back opaque
+ * {pointer,size} regions via md_get_state_regions(), and this is where
+ * those get wrapped in the real SFPTR8N/SFEND descriptors and handed to
+ * the real MDFNSS_StateAction plumbing, exactly like every one of
+ * Saturn's own subsystems does further down in this same function. */
+#include "vdp.h"
+extern bool system_mode_megadrive;
+extern int md_get_state_regions(VdpStateRegion *out, int max);
+
 int LibRetro_StateAction(StateMem* sm, const unsigned load)
 {
+   if (system_mode_megadrive)
+   {
+      VdpStateRegion regions[16];
+      int n = md_get_state_regions(regions, 16);
+      int i;
+      for (i = 0; i < n; i++)
+      {
+         SFORMAT sf[2] = { SFPTR8N((unsigned char*)regions[i].ptr, regions[i].size, regions[i].name), SFEND };
+         if (MDFNSS_StateAction(sm, load, false, sf, regions[i].name, false) == 0)
+            return 0;
+      }
+      return 1;
+   }
+
    bool RecordedNeedEmuICache;
    EventsPacker ep;
    SFORMAT StateRegs[14];   /* sized below; using a fixed buffer keeps

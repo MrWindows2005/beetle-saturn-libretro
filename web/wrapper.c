@@ -264,3 +264,118 @@ int saturn_sram_set(const uint8_t *buf, int size)
 	memcpy(data, buf, n);
 	return 1;
 }
+
+/* ---- "Modo Mega Drive" (see cores.js's own comment on it): a completely
+ * separate, standalone emulated system -- real Motorola 68000 + real
+ * Genesis sound chips + a real, from-scratch VDP (MegaDriveMode's own
+ * project, living at ../../MegaDriveMode relative to this file, not
+ * inside this submodule -- see that project's own core/core.c header
+ * comment). Deliberately bypasses this whole file's own retro_* plumbing
+ * above (environment_cb, retro_load_game, retro_run, etc.) instead of
+ * going through libretro.c's real "beetle_saturn_system_mode" core-option
+ * toggle: MegaDriveMode was never a libretro core in the first place (no
+ * retro_load_game/retro_run of its own), and duplicating Mednafen's own
+ * real CD-loading machinery just to immediately skip it every single
+ * frame would be real, pointless indirection for zero benefit -- calling
+ * its own already-clean md_* API directly, exactly like MegaDriveMode's
+ * own standalone web/build_web.sh already does, is the real, direct
+ * path. Exported here (not a separate WASM module) purely so this one
+ * page can offer both "Sega Saturn" and "Modo Mega Drive" without a
+ * second network fetch for a second .wasm file. */
+extern void md_init(void);
+extern void md_load_rom(const uint8_t *data, int size);
+extern void md_reset(void);
+extern void md_run_frame(void);
+extern int md_generate_audio(void);
+extern short *md_audio_ptr(void);
+extern unsigned int *md_framebuffer_ptr(int *width, int *height);
+
+static uint32_t md_out_rgba[320 * 224];
+static int md_out_w = 320, md_out_h = 224;
+static int md_out_audio_samples = 0;
+
+EMSCRIPTEN_KEEPALIVE
+int md_web_init(void)
+{
+	md_init();
+	return 1;
+}
+
+/* Real bug hit and fixed here: this returned void, but cores.js's own
+ * generic loadRom() binding does `ok = Module["_${p}_load_rom"](...)`
+ * and reports that straight back to main.js as load success/failure --
+ * a void return coerces to falsy in JS, so the real ROM load (verified
+ * working -- non-silent real audio came out) was being reported as a
+ * FAILURE to the rest of the page, which gates its own "loaded OK, show
+ * the game" UI on exactly this value. */
+EMSCRIPTEN_KEEPALIVE
+int md_web_load_rom(const uint8_t *data, int size)
+{
+	md_load_rom(data, size);
+	md_reset();
+	return 1;
+}
+
+/* Real convention this project's other core wrappers already use (see
+ * saturn_run_frame() above and every ${p}_run_frame in cores.js's own
+ * bindCore()): one call does BOTH video and audio for the frame, with
+ * separate _framebuffer_ptr/_audio_ptr/_audio_samples getters read
+ * afterward -- not a separate "generate audio" call the JS side has to
+ * remember to make. */
+EMSCRIPTEN_KEEPALIVE
+void md_web_run_frame(void)
+{
+	int w, h, x, y;
+	unsigned int *src;
+
+	md_run_frame();
+	md_out_audio_samples = md_generate_audio();
+
+	src = md_framebuffer_ptr(&w, &h);
+	md_out_w = w;
+	md_out_h = h;
+	/* Real MegaDriveMode framebuffer format is already 0x00RRGGBB per
+	 * pixel (see vdp.c's own cram_to_rgb()) -- just needs the same real
+	 * RGBA8888 repack video_refresh_cb_fn already does for Saturn's own
+	 * frames above, so this page's single <canvas> putImageData path
+	 * works unchanged for either system. */
+	for (y = 0; y < h; y++)
+	{
+		for (x = 0; x < w; x++)
+		{
+			uint32_t p = src[y * w + x];
+			uint32_t r = (p >> 16) & 0xff, g = (p >> 8) & 0xff, b = p & 0xff;
+			md_out_rgba[y * w + x] = r | (g << 8) | (b << 16) | (0xffu << 24);
+		}
+	}
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t *md_web_framebuffer_ptr(void) { return md_out_rgba; }
+
+EMSCRIPTEN_KEEPALIVE
+int md_web_framebuffer_width(void) { return md_out_w; }
+
+EMSCRIPTEN_KEEPALIVE
+int md_web_framebuffer_height(void) { return md_out_h; }
+
+EMSCRIPTEN_KEEPALIVE
+int md_web_framebuffer_len(void) { return md_out_w * md_out_h * 4; }
+
+EMSCRIPTEN_KEEPALIVE
+short *md_web_audio_ptr(void) { return md_audio_ptr(); }
+
+EMSCRIPTEN_KEEPALIVE
+int md_web_audio_samples(void) { return md_out_audio_samples; }
+
+/* Real hardware fact: MegaDriveMode has no controller peripheral emulated
+ * yet (see core/core.c's own header comment) -- a real no-op, not a
+ * missing feature hidden behind a fake success return. cores.js's own
+ * bindCore() calls this unconditionally, so it has to exist. */
+EMSCRIPTEN_KEEPALIVE
+void md_web_set_button(int player, int button, int pressed)
+{
+	(void)player;
+	(void)button;
+	(void)pressed;
+}

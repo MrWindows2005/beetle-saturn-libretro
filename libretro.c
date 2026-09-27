@@ -49,6 +49,7 @@
 
 #include "libretro_core_options.h"
 #include "libretro_settings.h"
+#include "mednafen/ss/sh7095_jit.h"
 #include "input.h"
 #include "disc.h"
 
@@ -192,6 +193,53 @@ static const bool PrevInterlaced = false;
 #endif
 
 static MDFN_Surface *surf = NULL;
+
+/* RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER: a buffer of the
+ * frontend's own, the size of the scanout surface, that this frame
+ * renders into instead of surf. video_cb then hands back a pointer
+ * inside the frontend's memory - the overscan and top-line crops
+ * below are a pointer offset at the surface stride, which the frontend
+ * accepts - so under threaded video the frame is presented without a
+ * full-frame copy.
+ *
+ * Declined, and the frame renders into surf as before, when the
+ * frontend has no such buffer or offers another format or stride, and
+ * whenever the picture is interlaced: in interlaced modes VDP2 writes
+ * only this field's lines and the other field's are the previous
+ * frame's, still in the surface (and WEAVE/FASTMAD read them too), so
+ * the surface has to persist from one frame to the next. */
+static MDFN_Surface lent_surf;
+static bool         last_frame_interlaced;
+
+static MDFN_Surface *acquire_lent_surface(void)
+{
+   struct retro_framebuffer fb;
+
+   if (!surf || !environ_cb)
+      return NULL;
+   if (last_frame_interlaced || PrevInterlaced)
+      return NULL;
+
+   memset(&fb, 0, sizeof(fb));
+   fb.width        = (unsigned)surf->w;
+   fb.height       = (unsigned)surf->h;
+   /* Read as well as write: the renderer's line mirror and blend
+    * read back what it scanned out this frame. */
+   fb.access_flags = RETRO_MEMORY_ACCESS_WRITE | RETRO_MEMORY_ACCESS_READ;
+
+   if (   !environ_cb(RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER, &fb)
+       || !fb.data
+       || fb.format != RETRO_PIXEL_FORMAT_XRGB8888
+       || fb.pitch  != (size_t)surf->pitchinpix * sizeof(uint32_t)
+       || !(fb.memory_flags & RETRO_MEMORY_TYPE_CACHED))
+      return NULL;
+
+   lent_surf.pixels     = (uint32_t*)fb.data;
+   lent_surf.w          = surf->w;
+   lent_surf.h          = surf->h;
+   lent_surf.pitchinpix = surf->pitchinpix;
+   return &lent_surf;
+}
 
 static void alloc_surface(void)
 {
@@ -376,6 +424,72 @@ static void check_variables(bool startup)
          cdimagecache = false;
          if (!strcmp(var.value, "enabled"))
             cdimagecache = true;
+      }
+
+      /* The DSP JIT switches are startup-only.  Every decoded SCU
+       * ProgRAM[] / NextInstr entry encodes which dispatch scheme it
+       * belongs to (C-handler offset vs JIT slot entered at a bias),
+       * and DSP_DecodeInstruction picks the scheme from the live
+       * setting; flipping it mid-run leaves the two mixed and the next
+       * tail dispatch enters a C handler eight bytes in.  The SCSP side
+       * likewise folds RBL/RBP into compiled code keyed on the setting.
+       * Read them once at startup and ignore later changes; the option
+       * text already says "Restart required". */
+      if (startup)
+      {
+         var.key = "beetle_saturn_jit_scu";
+         var.value = NULL;
+         if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+         {
+            if (!strcmp(var.value, "disabled"))
+               setting_jit_scu = false;
+            else
+               setting_jit_scu = true;
+         }
+
+         var.key = "beetle_saturn_cpucache_emumode";
+         var.value = NULL;
+         setting_cpucache_override = -1;
+         if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+         {
+            if (!strcmp(var.value, "data")) setting_cpucache_override = CPUCACHE_EMUMODE_DATA;
+            else if (!strcmp(var.value, "full")) setting_cpucache_override = CPUCACHE_EMUMODE_FULL;
+         }
+
+         var.key = "beetle_saturn_sh2_interleave";
+         var.value = NULL;
+         setting_sh2_interleave = 0;
+         if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value && strcmp(var.value, "exact"))
+            setting_sh2_interleave = atoi(var.value);
+         /* Windows above 16 cycles starve the slave SH-2 (it executes far
+          * fewer instructions and the game runs slow while the frame rate
+          * rises); those values were removed from the option.  Clamp so a
+          * stale config cannot reintroduce them. */
+         if (setting_sh2_interleave > 16)
+            setting_sh2_interleave = 16;
+
+         var.key = "beetle_saturn_sh2_jit";
+         var.value = NULL;
+         if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+            setting_sh2_jit = !strcmp(var.value, "enabled");
+         if (setting_sh2_jit)
+         {
+            if (getenv("SH2JIT_BLKSTATS"))
+      fprintf(stderr, "SH2JIT blocks: entries=%llu compiles=%llu validation-misses=%llu uncompilable=%llu\n",
+         (unsigned long long)SH2JIT_BlockStats[0], (unsigned long long)SH2JIT_BlockStats[1], (unsigned long long)SH2JIT_BlockStats[2], (unsigned long long)SH2JIT_BlockStats[3]);
+   if (getenv("SH2JIT_COUNT")) SH2JIT_SetCounting(true);
+            SS_SH2JIT_Init();
+         }
+
+         var.key = "beetle_saturn_jit_scsp";
+         var.value = NULL;
+         if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+         {
+            if (!strcmp(var.value, "disabled"))
+               setting_jit_scsp = false;
+            else
+               setting_jit_scsp = true;
+         }
       }
 
       var.key = "beetle_saturn_shared_int";
@@ -1013,6 +1127,16 @@ static const struct STVGameInfo* prepare_stv_zip_content(
    return sgi;
 }
 
+/* beetle_saturn_cpucache_emumode: a user override of the per-game
+ * database's cache emulation mode, applied at every InitCommon path. */
+static unsigned apply_cpucache_override(unsigned db_mode)
+{
+   if (setting_cpucache_override < 0)
+      return db_mode;
+   log_cb(RETRO_LOG_INFO, "CPU cache emulation mode overridden by core option.\n");
+   return (unsigned)setting_cpucache_override;
+}
+
 static bool MDFNI_LoadGame(const char *name)
 {
    unsigned horrible_hacks   = 0;
@@ -1075,7 +1199,7 @@ static bool MDFNI_LoadGame(const char *name)
                   cart_type = setting_cart;
 
                // GO!
-               if (InitCommon(cpucache_emumode,
+               if (InitCommon(apply_cpucache_override(cpucache_emumode),
                     horrible_hacks, cart_type, region,
                     NULL, NULL, NULL))
                {
@@ -1140,7 +1264,7 @@ static bool MDFNI_LoadGame(const char *name)
              * uses it for log/error context only (cart/stv.c walks
              * rom_layout independently); pass rom_layout[0].fname
              * as the natural "lead" file the cache dir contains. */
-            if (InitCommon(cpucache_emumode, horrible_hacks, cart_type,
+            if (InitCommon(apply_cpucache_override(cpucache_emumode), horrible_hacks, cart_type,
                            region, cache_dir, sgi->rom_layout[0].fname, sgi))
             {
                MDFN_LoadGameCheats();
@@ -1194,7 +1318,7 @@ static bool MDFNI_LoadGame(const char *name)
                cpucache_emumode  = CPUCACHE_EMUMODE_FULL;
                horrible_hacks    = 0; // HORRIBLEHACK_VDP1RWDRAWSLOWDOWN if exposed
 
-               if (InitCommon(cpucache_emumode, horrible_hacks, cart_type,
+               if (InitCommon(apply_cpucache_override(cpucache_emumode), horrible_hacks, cart_type,
                               region, dir_buf, base, sgi))
                {
                   MDFN_LoadGameCheats();
@@ -1222,7 +1346,7 @@ static bool MDFNI_LoadGame(const char *name)
       cart_type = setting_cart;
 
    // Initialise with safe parameters
-   if (!InitCommon(cpucache_emumode, horrible_hacks, cart_type, region, NULL, NULL, NULL))
+   if (!InitCommon(apply_cpucache_override(cpucache_emumode), horrible_hacks, cart_type, region, NULL, NULL, NULL))
       return false;
 
    MDFN_LoadGameCheats();
@@ -1380,6 +1504,19 @@ bool retro_load_game(const struct retro_game_info *info)
 
 void retro_unload_game(void)
 {
+#ifdef SS_DIAG_COUNTERS
+   if (getenv("SS_DIAG"))
+   {
+      extern uint64_t SS_DiagSteps[2];
+      fprintf(stderr, "SS_DIAG: master steps=%llu slave steps=%llu\n",
+         (unsigned long long)SS_DiagSteps[0], (unsigned long long)SS_DiagSteps[1]);
+   }
+#endif
+   if (getenv("SH2JIT_COUNT"))
+      fprintf(stderr, "SH2JIT: native=%llu chains=%llu fallback=%llu (native/instr=%.1f%%, avg chain=%.2f)\n",
+         (unsigned long long)SH2JIT_NativeCount, (unsigned long long)SH2JIT_ChainCount, (unsigned long long)SH2JIT_FallbackCount,
+         100.0 * SH2JIT_NativeCount / (double)(SH2JIT_NativeCount + SH2JIT_FallbackCount + 1),
+         SH2JIT_NativeCount / (double)(SH2JIT_ChainCount + 1));
    if(!MDFNGameInfo)
       return;
 
@@ -1527,13 +1664,20 @@ void retro_run(void)
     * semantics: surface/LineWidths NULL, InterlaceOn/Field/skip
     * false, sizes/cycles 0. */
    EmulateSpecStruct spec = {0};
-   spec.surface = surf;
+   /* The frontend's buffer when it lends one, else the core's own. */
+   MDFN_Surface *frame_surf = acquire_lent_surface();
+   if (!frame_surf)
+      frame_surf = surf;
+   spec.surface = frame_surf;
    spec.LineWidths = rects;
    spec.SoundBufSize = 0;
 
    EmulateSpecStruct *espec = (EmulateSpecStruct*)&spec;
 
    Emulate(espec);
+
+   /* Before the deinterlacer clears it: next frame's lend decision. */
+   last_frame_interlaced = spec.InterlaceOn;
 
 #ifdef NEED_DEINTERLACER
    if (spec.InterlaceOn)
@@ -1563,7 +1707,7 @@ void retro_run(void)
 
 #endif
    const void *fb      = NULL;
-   const uint32_t *pix = surf->pixels;
+   const uint32_t *pix = frame_surf->pixels;
    size_t pitch        = FB_WIDTH * sizeof(uint32_t);
 
    hires_h_mode  = (rects[0] == 704) ? true : false;
@@ -1596,7 +1740,7 @@ void retro_run(void)
       input_set_geometry(cur_width, cur_height);
    }
 
-   pix += surf->pitchinpix * (linevisfirst << PrevInterlaced) + overscan_mask;
+   pix += frame_surf->pitchinpix * (linevisfirst << PrevInterlaced) + overscan_mask;
 
    fb = pix;
 

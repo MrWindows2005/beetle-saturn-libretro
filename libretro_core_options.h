@@ -171,6 +171,79 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "disabled"
    },
    {
+      "beetle_saturn_jit_scu",
+      "SCU DSP JIT Binary Translator (Restart)",
+      NULL,
+      "Use the native JIT binary translator for the SCU DSP. Available on x86, x86-64 and Linux/Android aarch64 builds; elsewhere the interpreter is always used. Restart required.",
+      NULL,
+      "system",
+      {
+         { "disabled", NULL },
+         { "enabled",  NULL },
+         { NULL, NULL },
+      },
+      "enabled"
+   },
+   {
+      "beetle_saturn_cpucache_emumode",
+      "CPU Cache Emulation (Restart)",
+      NULL,
+      "Which SH-2 cache emulation mode to use. 'Auto' takes it from the per-game database: 'Data only' for most titles, 'Full' (instruction cache emulated, slower) for the games known to need it and for all ST-V games. Override only to test; 'Data only' on a game that needs 'Full' can glitch or hang. Restart required.",
+      NULL,
+      "system",
+      {
+         { "auto", "Auto (per-game database)" },
+         { "data", "Data only" },
+         { "full", "Full" },
+         { NULL, NULL },
+      },
+      "auto"
+   },
+   {
+      "beetle_saturn_sh2_interleave",
+      "SH-2 CPU Sync Mode (Restart)",
+      NULL,
+      "How closely the two SH-2 CPUs are kept in step. 'Exact' alternates them every instruction and reproduces the previous behaviour byte for byte. The 'Fast' modes let the master run a few cycles ahead of the slave before the slave catches up, which avoids alternating the two CPUs' working sets every instruction, and schedule idle DMA controllers by event instead of polling. Each CPU still executes its full instruction count (within 1-2%), so games run at true speed; measured gain about 15% on Daytona USA and Virtua Fighter 2. Larger windows were removed: they starve the slave and only appear faster. Use Exact if a game hangs, desyncs, has audio problems or renders incorrectly in a Fast mode. Restart required.",
+      NULL,
+      "system",
+      {
+         { "exact", "Exact (Accurate)" },
+         { "4",     "Fast (4 cycles)" },
+         { "8",     "Fast (8 cycles, recommended)" },
+         { "16",    "Fast (16 cycles)" },
+         { NULL, NULL },
+      },
+      "exact"
+   },
+   {
+      "beetle_saturn_sh2_jit",
+      "SH-2 Instruction JIT (Experimental, Restart)",
+      NULL,
+      "Run the master SH-2's ordinary instructions through natively compiled per-instruction handlers, keeping the interpreter's exact timing. Only with CPU cache emulation off ('Data only'), x86/x86-64 only. Restart required.",
+      NULL,
+      "system",
+      {
+         { "disabled", NULL },
+         { "enabled",  NULL },
+         { NULL, NULL },
+      },
+      "disabled"
+   },
+   {
+      "beetle_saturn_jit_scsp",
+      "SCSP DSP JIT Binary Translator (Restart)",
+      NULL,
+      "Use the native JIT binary translator for the SCSP DSP (MPROG). Available on x86, x86-64 and Linux/Android aarch64 builds; elsewhere the interpreter is always used. Restart required.",
+      NULL,
+      "system",
+      {
+         { "disabled", NULL },
+         { "enabled",  NULL },
+         { NULL, NULL },
+      },
+      "enabled"
+   },
+   {
       "beetle_saturn_initial_scanline",
       "Initial Scanline",
       NULL,

@@ -89,6 +89,7 @@ bool NeedEmuICache;
 #include "ss_state.h"
 
 #include "sh7095.h"
+#include "sh7095_jit.h"
 
 static uint8_t SCU_MSH2VectorFetch(void);
 static uint8_t SCU_SSH2VectorFetch(void);
@@ -166,6 +167,20 @@ bool CartNV_Dirty;
 int64_t UpdateInputLastBigTS;
 
 int32_t SH7095_mem_timestamp;
+sscpu_timestamp_t SH2_InterleaveQuantum = 0;   /* 0 = exact per-instruction interleave */
+/* Quantised-interleave mode only: idle DMA event handlers disable their
+ * event instead of polling.  Off in exact mode, where the poll phase is
+ * part of the reproduced timing. */
+bool SH2_FastDMAEvents = false;
+#ifdef SS_DIAG_COUNTERS
+uint64_t SS_DiagSteps[2];
+#endif
+
+void SH7095_DMAEventRearm(SH7095* z)
+{
+ if(SH2_FastDMAEvents)
+  SS_SetEventNT(&events[z->event_id_dma], SH7095_mem_timestamp + 32);
+}
 /* SH7095_BusLock is read from ss.c's SH_DMA_EventHandler -- promoted
  * from file-static to TU-external in phase 7c. */
 uint32_t SH7095_BusLock;
@@ -1084,9 +1099,13 @@ static NO_INLINE MDFN_HOT int32_t RunLoop_ICache(EmulateSpecStruct* espec)
     /* master Step dispatch.  RunLoop is templated on
      * EmulateICache so this folds to one direct call per
      * instantiation. */
-    SH7095_Step_w0_C1(&CPU[0]);
+    SH7095_Step_w0_C1(&CPU[0]); SS_DIAG_STEP(0);
     SH7095_DMA_BusTimingKludge(&CPU[0]);
-
+    /* Exact: the slave catches up after every master instruction (the
+     * mid-instruction yields are inside RunSlaveUntil).  Quantised: only
+     * once the master is more than the quantum ahead; the bound is the
+     * same, so it then catches up fully. */
+    if(!SH2_InterleaveQuantum || CPU[0].timestamp - SH2_InterleaveQuantum > CPU[1].timestamp)
     {
       SH7095_RunSlaveUntil(&CPU[1], CPU[0].timestamp);
     }
@@ -1122,13 +1141,72 @@ static NO_INLINE MDFN_HOT int32_t RunLoop_NoICache(EmulateSpecStruct* espec)
     /* master Step dispatch.  RunLoop is templated on
      * EmulateICache so this folds to one direct call per
      * instantiation. */
-    SH7095_Step_w0_C0(&CPU[0]);
+    SH7095_Step_w0_C0(&CPU[0]); SS_DIAG_STEP(0);
     SH7095_DMA_BusTimingKludge(&CPU[0]);
 
     {
-     while(MDFN_LIKELY(CPU[0].timestamp > CPU[1].timestamp))
+     /* Exact: the slave catches up after every master instruction.
+      * Quantised: only once the master is more than the quantum ahead;
+      * it then catches up fully, as before. */
+     if(MDFN_LIKELY(CPU[0].timestamp - SH2_InterleaveQuantum > CPU[1].timestamp))   /* an idle slave parks near INT32_MAX: never add to its side */
      {
-      SH7095_Step_w1_C0(&CPU[1]);
+      while(CPU[0].timestamp > CPU[1].timestamp)
+      { SH7095_Step_w1_C0(&CPU[1]); SS_DIAG_STEP(1); }
+     }
+    }
+
+    eff_ts = CPU[0].timestamp;
+    if(SH7095_mem_timestamp > eff_ts)
+     eff_ts = SH7095_mem_timestamp;
+    else
+     SH7095_mem_timestamp = eff_ts;
+   } while(MDFN_LIKELY(eff_ts < next_event_ts));
+  } while(MDFN_LIKELY(EventHandler(eff_ts)));
+ } while(MDFN_LIKELY(Running != 0));
+
+ return eff_ts;
+}
+
+/* JIT setup with the loop state it reads (CPU[] and next_event_ts are
+ * this TU's). */
+extern sscpu_timestamp_t next_event_ts;   /* defined further down in this TU */
+void SS_SH2JIT_Init(void)
+{
+ SH2_InterleaveQuantum = setting_sh2_interleave;
+ SH2JIT_Init(&CPU[0], &CPU[1], &SH7095_mem_timestamp, &next_event_ts, SH2_InterleaveQuantum);
+}
+
+/* Same loop with the master on the instruction JIT. */
+static NO_INLINE MDFN_HOT int32_t RunLoop_NoICache_JIT(EmulateSpecStruct* espec)
+{
+
+ sscpu_timestamp_t eff_ts = 0;
+
+ do
+ {
+  SMPC_ProcessSlaveOffOn();
+  //
+  //
+  Running = true;
+  ForceEventUpdates(eff_ts);
+  do
+  {
+   do
+   {
+    /* master Step dispatch.  RunLoop is templated on
+     * EmulateICache so this folds to one direct call per
+     * instantiation. */
+    SH7095_Step_JIT_w0_C0(&CPU[0]);
+    SH7095_DMA_BusTimingKludge(&CPU[0]);
+
+    {
+     /* Exact: the slave catches up after every master instruction.
+      * Quantised: only once the master is more than the quantum ahead;
+      * it then catches up fully, as before. */
+     if(MDFN_LIKELY(CPU[0].timestamp - SH2_InterleaveQuantum > CPU[1].timestamp))   /* an idle slave parks near INT32_MAX: never add to its side */
+     {
+      while(CPU[0].timestamp > CPU[1].timestamp)
+      { SH7095_Step_w1_C0(&CPU[1]); SS_DIAG_STEP(1); }
      }
     }
 
@@ -1508,10 +1586,17 @@ void Emulate(struct EmulateSpecStruct* espec_arg)
  espec->SoundBufSize = 0;
  espec->MasterCycles = 0;
 
+ SH2_InterleaveQuantum = setting_sh2_interleave;
+ SH2_FastDMAEvents = (setting_sh2_interleave != 0);
  if (NeedEmuICache)
   end_ts = RunLoop_ICache(espec);
  else
-  end_ts = RunLoop_NoICache(espec);
+  {
+   if(setting_sh2_jit && SH2JIT_Available())
+    end_ts = RunLoop_NoICache_JIT(espec);
+   else
+    end_ts = RunLoop_NoICache(espec);
+  }
  assert(end_ts >= 0);
 
  ForceEventUpdates(end_ts);
@@ -1779,7 +1864,9 @@ bool MDFN_COLD InitCommon(const unsigned cpucache_emumode, const unsigned horrib
           * byte-swap finalisation at the bottom. */
          bool bios_loaded = false;
 
-         snprintf(bios_path, sizeof(bios_path), "%s" RETRO_SLASH "%s", retro_base_directory, bios_filename);
+         snprintf(bios_path, sizeof(bios_path), "%.*s" RETRO_SLASH "%s",
+               (int)(sizeof(bios_path) - strlen(bios_filename) - sizeof(RETRO_SLASH)),
+               retro_base_directory, bios_filename);
 
          BIOSFile = filestream_open(bios_path,
                RETRO_VFS_FILE_ACCESS_READ,
@@ -1805,7 +1892,9 @@ bool MDFN_COLD InitCommon(const unsigned cpucache_emumode, const unsigned horrib
                char zip_path[4096 + 32];
                zip_archive za;
                snprintf(zip_path, sizeof(zip_path),
-                     "%s" RETRO_SLASH "stvbios.zip", retro_base_directory);
+                     "%.*s" RETRO_SLASH "stvbios.zip",
+                     (int)(sizeof(zip_path) - sizeof(RETRO_SLASH "stvbios.zip")),
+                     retro_base_directory);
                if(zip_open(&za, zip_path))
                {
                   const struct zip_entry *ze = zip_find(&za, bios_filename);

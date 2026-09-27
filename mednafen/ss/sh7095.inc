@@ -136,7 +136,7 @@ static void SH7095_DoIDIF_INLINE_C0_I0(SH7095* z);
 static void SH7095_DoIDIF_INLINE_C0_I1(SH7095* z);
 static void SH7095_DoIDIF_INLINE_C1_I0(SH7095* z);
 static void SH7095_DoIDIF_INLINE_C1_I1(SH7095* z);
-static void SH7095_DoIDIF_NI_C0_I0(SH7095* z);
+MDFN_HIDE void SH7095_DoIDIF_NI_C0_I0(SH7095* z);   /* exported: sh7095_jit handlers call it */
 static void SH7095_DoIDIF_NI_C0_I1(SH7095* z);
 static void SH7095_DoIDIF_NI_C1_I0(SH7095* z);
 static void SH7095_DoIDIF_NI_C1_I1(SH7095* z);
@@ -716,6 +716,8 @@ sscpu_timestamp_t SH7095_DMA_Update(SH7095* z, sscpu_timestamp_t et)
  else if(MDFN_UNLIKELY(z->ExtHaltDMA))
  {
   z->DMA_Timestamp = et;
+  if(SH2_FastDMAEvents)
+   return SS_EVENT_DISABLED_TS;     /* SH7095_DMAEventRearm on the halt transitions */
   return z->DMA_Timestamp + 128;
  }
  else
@@ -766,6 +768,8 @@ sscpu_timestamp_t SH7095_DMA_Update(SH7095* z, sscpu_timestamp_t et)
   SH7095_RecalcPendingIntPEX(z);	// TODO: conditionalize(or make SH7095_RecalcPendingIntPEX(z) less expensive).
  }
 
+ if(SH2_FastDMAEvents && et >= z->DMA_SGEndTimestamp && !SH7095_DMA_RunCond(z, 0) && !SH7095_DMA_RunCond(z, 1))
+  return SS_EVENT_DISABLED_TS;      /* nothing to do until a DMAC register write (DMA_StartSG re-arms) */
  return et + ((et < z->DMA_SGEndTimestamp) ? 32 : 128);
 }
 
@@ -4912,7 +4916,7 @@ static INLINE void SH7095_DoIDIF_INLINE_C1_I1(SH7095* z)
  DoIDIF_MACRO(true);
 }
 
-static NO_INLINE MDFN_HOT void SH7095_DoIDIF_NI_C0_I0(SH7095* z)
+MDFN_HIDE NO_INLINE MDFN_HOT void SH7095_DoIDIF_NI_C0_I0(SH7095* z)
 {
  SH7095_DoIDIF_INLINE_C0_I0(z);
 }
@@ -4957,6 +4961,171 @@ FORCE_INLINE void SH7095_Step_w0_C0(SH7095* z)
  //
  #include "sh7095_ops.inc"
  //
+}
+
+/* Flat copy of the decoder for the JIT's inlined fetch: op id per
+ * 16-bit word, exactly InstrDecodeTab_Lookup. */
+MDFN_HIDE void SH7095_JIT_BuildOpIDTable(uint8_t* tab)
+{
+ unsigned i;
+ for(i = 0; i < 65536; i++)
+  tab[i] = (uint8_t)InstrDecodeTab_Lookup(i);
+}
+
+/* MAC.L / MAC.W arithmetic for the JIT, on the operands the handler has
+ * stored in the interpreter's own resume fields: the same statements as
+ * the op bodies after their two reads. */
+MDFN_HIDE void SH7095_JIT_MACL_Arith(SH7095* z)
+{
+ const int32_t m0 = z->Resume_MAC_L_m0, m1 = z->Resume_MAC_L_m1;
+ uint64_t a, b, sum;
+ a = SH7095_GetMAC64(z);
+ b = (int64_t)m0 * m1;
+ sum = a + b;
+ if(SH7095_GetS(z) && sum > 0x00007FFFFFFFFFFFULL && sum < 0xFFFF800000000000ULL)
+ {
+  if((int32_t)(m0 ^ m1) < 0)
+   sum = 0xFFFF800000000000ULL;
+  else
+   sum = 0x00007FFFFFFFFFFFULL;
+ }
+ SH7095_SetMAC64(z, sum);
+}
+
+MDFN_HIDE void SH7095_JIT_MACW_Arith(SH7095* z)
+{
+ const int16_t m0 = z->Resume_MAC_W_m0, m1 = z->Resume_MAC_W_m1;
+ if(SH7095_GetS(z))
+ {
+  int32_t b = (int32_t)m0 * m1;
+  uint64_t sum = (int64_t)(int32_t)z->MACL + b;
+  if(sum > 0x000000007FFFFFFFULL && sum < 0xFFFFFFFF80000000ULL)
+  {
+   z->MACH |= 1;
+   if(b < 0)
+    sum = 0x80000000ULL;
+   else
+    sum = 0x7FFFFFFFULL;
+  }
+  z->MACL = sum;
+ }
+ else
+  SH7095_SetMAC64(z, SH7095_GetMAC64(z) + (int64_t)m0 * m1);
+}
+
+/* Branch primitives for the JIT, the macros under the master /
+ * no-icache constants.  UCDelayBranch is for ops that do not prefetch
+ * (BEGIN_OP_DLYIDIF: BRA/BSR/JMP/JSR/RTS...), DelayBranch for ones that
+ * do (BF/S, BT/S), Branch for the non-delayed conditionals (BF, BT). */
+MDFN_HIDE void SH7095_JIT_UCDelayBranch_C0(SH7095* z, uint32_t target)
+{
+ const unsigned which = 0; const bool EmulateICache = false; (void)which;
+ UCDelayBranch(target);
+}
+/* (Parameter deliberately not named `target`: DelayBranch/Branch declare
+ * a local of that name from their argument.) */
+MDFN_HIDE void SH7095_JIT_DelayBranch_C0(SH7095* z, uint32_t tgt)
+{
+ const unsigned which = 0; const bool EmulateICache = false; (void)which;
+ DelayBranch(tgt);
+}
+MDFN_HIDE void SH7095_JIT_Branch_C0(SH7095* z, uint32_t tgt)
+{
+ const unsigned which = 0; const bool EmulateICache = false; (void)which;
+ Branch(tgt);
+}
+
+/* The tail of FUSE_COND_BRANCH for the JIT: called by a handler for a
+ * fusion-source op (TST, CMP/GT, DT, CMP/EQ #imm, TST #imm) once it has
+ * set T and found the next op byte to be BF or BT.  Same statements as
+ * the macro: consume the branch word, fetch the one after, branch. */
+MDFN_HIDE void SH7095_JIT_FusedCondBranch_C0(SH7095* z, bool cond)
+{
+ const unsigned which = 0;
+ const bool EmulateICache = false;
+ const uint16_t br_instr = (uint16_t)z->Pipe_ID;
+ (void)which;
+ z->PC += 2;
+ DoIDIF(false);
+ CondRelBranch(cond, (uint32_t)(int8_t)br_instr << 1);
+}
+
+/* Out-of-line copy of the master's no-icache step, for the JIT's
+ * fallback: the inline one stays in its own RunLoop untouched. */
+static NO_INLINE MDFN_HOT void SH7095_Step_w0_C0_NI(SH7095* z)
+{
+ SH7095_Step_w0_C0(z);
+}
+
+/* Master step with the instruction JIT (see sh7095_jit.h).  Same
+ * FRT/WDT check as the interpreter; an ordinary instruction (op byte
+ * < 0x80: not a delay slot, no exception pending) with a native
+ * handler runs it, everything else runs the interpreter's switch. */
+static FORCE_INLINE void SH7095_Step_JIT_w0_C0(SH7095* z)
+{
+ if(MDFN_UNLIKELY(z->timestamp >= z->FRT_WDT_NextTS))
+ {
+  SH7095_FRT_WDT_Update(z);
+  SH7095_FRT_WDT_Recalc_NET(z);
+ }
+ /* Dispatch when the op byte is the word's own decode, with or without
+  * the delay-slot flag: every word with a handler is a non-branch op
+  * whose delay-slot case shares the body verbatim.  Pseudo-ops and the
+  * exception pseudo-op carry other op bytes and go to the interpreter. */
+ { static int off = -1; if(off < 0) off = getenv("SH2JIT_OFF") != NULL; if(off) { SH7095_Step_w0_C0_NI(z); return; } }   /* control: measure the JIT loop with every step on the interpreter */
+ /* Slave powered off, ordinary instruction (no delay flag, no exception):
+  * run a compiled block; it exits at an interpreter-exact step boundary. */
+ if((z->Pipe_ID >> 24) == SH2JIT_OpID[z->Pipe_ID & 0xFFFF] && CPU[1].timestamp == SS_EVENT_DISABLED_TS && SH2JIT_RunBlock(z))
+  return;
+ if(MDFN_LIKELY(((z->Pipe_ID >> 24) & 0x7F) == SH2JIT_OpID[z->Pipe_ID & 0xFFFF]))
+ {
+  void (*h)(struct SH7095*) = SH2JIT_Table[z->Pipe_ID & 0xFFFF];
+  if(MDFN_UNLIKELY(!h))
+   h = SH2JIT_Handler(z->Pipe_ID & 0xFFFF);
+  if(MDFN_LIKELY(h != NULL))
+  {
+#ifndef SH2JIT_VERIFY
+   /* One or more instructions natively; the C loop's checks below are
+    * idempotent for whatever the chain already applied. */
+#ifdef SH2JIT_COUNT
+   SH2JIT_ChainCount++;
+#endif
+   SH2JIT_RunChain(z);
+   return;
+#else
+   /* Debug: run the handler on a copy and the interpreter on the real
+    * state, then compare.  Valid while no handler writes memory. */
+   {
+    static SH7095 tmp; static unsigned reported;
+    const uint32_t instr = z->Pipe_ID & 0xFFFF;
+    const unsigned opb = z->Pipe_ID >> 24;
+    if(!SH2JIT_Pure[instr]) { SH2JIT_SetSingleStep(true); SH2JIT_RunChain(z); return; }   /* memory ops can't be run twice */
+    memcpy(&tmp, z, sizeof tmp);
+    (void)h;
+    SH2JIT_SetSingleStep(true);
+    SH2JIT_RunChain(&tmp);
+    SH7095_Step_w0_C0_NI(z);
+    if(memcmp(&tmp, z, sizeof tmp) && reported < 8)
+    {
+     const unsigned char* a = (const unsigned char*)&tmp; const unsigned char* b = (const unsigned char*)z;
+     size_t i; reported++;
+     for(i = 0; i < sizeof tmp; i++) if(a[i] != b[i]) break;
+     fprintf(stderr, "SH2JIT mismatch instr=%04x opbyte=%02x first byte off=%zu (R=%zu PC=%zu SR=%zu ts=%zu MA=%zu WB=%zu Pipe_ID=%zu) jit=%08x interp=%08x\n",
+      instr, opb, i, offsetof(SH7095, R), offsetof(SH7095, PC), offsetof(SH7095, SR), offsetof(SH7095, timestamp), offsetof(SH7095, MA_until), offsetof(SH7095, WB_until), offsetof(SH7095, Pipe_ID),
+      *(const uint32_t*)(a + (i & ~3u)), *(const uint32_t*)(b + (i & ~3u)));
+    }
+    return;
+   }
+#endif
+   h(z);
+   return;
+  }
+ }
+ { static int tr = -1; if(tr < 0) tr = getenv("SH2JIT_TRACEFB") != NULL; if(tr) fprintf(stderr, "F %04x %02x\n", z->Pipe_ID & 0xFFFF, z->Pipe_ID >> 24); }
+ SH7095_Step_w0_C0_NI(z);
+#ifdef SH2JIT_COUNT
+ SH2JIT_FallbackCount++;
+#endif
 }
 
 FORCE_INLINE void SH7095_Step_w0_C1(SH7095* z)

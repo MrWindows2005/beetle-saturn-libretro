@@ -52,6 +52,24 @@
 #include "input.h"
 #include "disc.h"
 
+/* "Modo Mega Drive" -- a separate, experimental system mode toggled by
+ * the "beetle_saturn_system_mode" core option (see
+ * libretro_core_options.h's own comment on it): a real Motorola 68000 +
+ * real Genesis sound chips, entirely independent of this core's own
+ * real Saturn emulation below. Lives in its own top-level MegaDriveMode/
+ * directory (not inside this submodule) so this custom work stays out
+ * of beetle-saturn-libretro's own upstream history -- see that
+ * project's own core/core.c header comment for what it does and does
+ * not implement yet (no VDP, no Z80). */
+extern void md_init(void);
+extern void md_load_rom(const unsigned char *data, int size);
+extern void md_reset(void);
+extern void md_run_frame(void);
+extern int md_generate_audio(void);
+extern short *md_audio_ptr(void);
+
+static bool system_mode_megadrive = false;
+
 #define MEDNAFEN_CORE_NAME                   "Beetle Saturn"
 #define MEDNAFEN_CORE_VERSION                "v1.32.1"
 #define MEDNAFEN_CORE_VERSION_NUMERIC        0x00103201
@@ -328,6 +346,15 @@ static void check_variables(bool startup)
 
    if (startup)
    {
+      var.key = "beetle_saturn_system_mode";
+      var.value = NULL;
+      system_mode_megadrive = false;
+      if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+      {
+         if (!strcmp(var.value, "megadrive"))
+            system_mode_megadrive = true;
+      }
+
       var.key = "beetle_saturn_cdimagecache";
       var.value = NULL;
       if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
@@ -1202,6 +1229,56 @@ bool retro_load_game(const struct retro_game_info *info)
    if (!environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt))
       return false;
 
+   /* "Modo Mega Drive" branch: read the toggle directly here (this runs
+    * before check_variables(true) below, which is this core's own real
+    * Saturn setup path) and, if set, skip all of Saturn's own real
+    * CD-image loading entirely -- a flat Genesis ROM is nothing like a
+    * disc image, so none of that logic applies. */
+   {
+      struct retro_variable var = { "beetle_saturn_system_mode", NULL };
+      system_mode_megadrive = false;
+      if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+         system_mode_megadrive = !strcmp(var.value, "megadrive");
+   }
+
+   if (system_mode_megadrive)
+   {
+      const unsigned char *rom_data = (const unsigned char *)info->data;
+      int rom_size = (int)info->size;
+      unsigned char *file_buf = NULL;
+
+      /* This core normally expects only a path for CD images (its own
+       * real NEED_FULLPATH convention) -- a flat ROM still needs actual
+       * bytes, so read it ourselves when the frontend didn't already
+       * hand us info->data. */
+      if (!rom_data && info->path)
+      {
+         RFILE *rf = filestream_open(info->path,
+               RETRO_VFS_FILE_ACCESS_READ, RETRO_VFS_FILE_ACCESS_HINT_NONE);
+         if (rf)
+         {
+            int64_t size64 = filestream_get_size(rf);
+            file_buf = (unsigned char *)malloc((size_t)size64);
+            if (file_buf)
+            {
+               filestream_read(rf, file_buf, (int64_t)size64);
+               rom_data = file_buf;
+               rom_size = (int)size64;
+            }
+            filestream_close(rf);
+         }
+      }
+
+      if (!rom_data)
+         return false;
+
+      md_init();
+      md_load_rom(rom_data, rom_size);
+      md_reset();
+      free(file_buf);
+      return true;
+   }
+
    extract_basename(retro_cd_base_name,       info->path, sizeof(retro_cd_base_name));
    extract_directory(retro_cd_base_directory, info->path, sizeof(retro_cd_base_directory));
 
@@ -1311,8 +1388,34 @@ void retro_unload_game(void)
 // MDFN_MidSync below for the full rationale.
 static bool current_frame_is_sim = false;
 
+/* Real Genesis H40/NTSC geometry (320x224) -- placeholder-black since
+ * this mode has no VDP yet (see the core option's own comment). Static
+ * so it's only zeroed once, not re-cleared every single frame. */
+#define MEGADRIVE_PLACEHOLDER_W 320
+#define MEGADRIVE_PLACEHOLDER_H 224
+static uint32_t megadrive_placeholder_fb[MEGADRIVE_PLACEHOLDER_W * MEGADRIVE_PLACEHOLDER_H];
+
 void retro_run(void)
 {
+   if (system_mode_megadrive)
+   {
+      short *audio;
+      int n;
+
+      input_poll_cb();
+
+      md_run_frame();
+      n = md_generate_audio();
+      audio = md_audio_ptr();
+      if (audio_batch_cb)
+         audio_batch_cb(audio, n);
+
+      if (video_cb)
+         video_cb(megadrive_placeholder_fb, MEGADRIVE_PLACEHOLDER_W,
+               MEGADRIVE_PLACEHOLDER_H, MEGADRIVE_PLACEHOLDER_W * sizeof(uint32_t));
+      return;
+   }
+
    bool updated = false;
    bool hires_h_mode;
    unsigned overscan_mask;
@@ -1550,6 +1653,20 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
 
    memset(info, 0, sizeof(*info));
    info->timing.sample_rate    = 44100;
+
+   if (system_mode_megadrive)
+   {
+      /* Real Genesis NTSC H40 geometry/rate -- see retro_run's own
+       * placeholder-framebuffer comment for why there's no real picture
+       * yet even though the geometry itself is real. */
+      info->geometry.base_width  = MEGADRIVE_PLACEHOLDER_W;
+      info->geometry.base_height = MEGADRIVE_PLACEHOLDER_H;
+      info->geometry.max_width   = MEGADRIVE_PLACEHOLDER_W;
+      info->geometry.max_height  = MEGADRIVE_PLACEHOLDER_H;
+      info->geometry.aspect_ratio = 4.0f / 3.0f;
+      info->timing.fps = 59.922743862;  /* real NTSC Genesis frame rate */
+      return;
+   }
 
    // Report the same base geometry that retro_run's SET_GEOMETRY will
    // converge on, instead of the old 320x240. The frontend uses these

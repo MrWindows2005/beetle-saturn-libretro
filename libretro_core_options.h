@@ -76,6 +76,20 @@ struct retro_core_option_v2_category option_cats_us[] = {
 
 struct retro_core_option_v2_definition option_defs_us[] = {
    {
+      "beetle_saturn_system_mode",
+      "System Mode",
+      NULL,
+      "Saturn: real Sega Saturn emulation (default). Mega Drive: an experimental separate mode -- a real Motorola 68000 + real Genesis sound chips (YM2612-family FM + SN76489-family PSG) running a flat Genesis ROM instead of a Saturn disc image. This mode has no VDP or Z80 yet, so games display no real picture and typically hang waiting on VDP hardware that isn't implemented; only CPU + sound are real so far. Restart required.",
+      NULL,
+      "system",
+      {
+         { "saturn",    "Saturn" },
+         { "megadrive", "Mega Drive (experimental, CPU+sound only)" },
+         { NULL, NULL },
+      },
+      "saturn"
+   },
+   {
       "beetle_saturn_region",
       "System Region",
       NULL,

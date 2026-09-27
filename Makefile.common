@@ -172,6 +172,22 @@ SOURCES_C += $(MEDNAFEN_DIR)/cdstream.c \
 		$(MEDNAFEN_DIR)/hash/md5.c \
 		$(MEDNAFEN_DIR)/hash/sha256.c
 
+# "Modo Mega Drive" (see libretro.c's own comment on it): lives in its
+# own top-level MegaDriveMode/ directory next to this submodule, not
+# inside it -- keeps this custom work out of beetle-saturn-libretro's
+# own upstream git history. Its vendored Musashi-derived 68000 core uses
+# a completely different symbol namespace (m68k_init/m68k_run/etc, a
+# global "m68k" struct) than Mednafen's own hand-written 68000 core
+# already built above for the real Saturn SCSP sound CPU (M68K/RecalcInt/
+# Read_u16/etc) -- confirmed no symbol collision before wiring this in.
+MEGADRIVE_MODE_DIR := $(CORE_DIR)/../MegaDriveMode
+INCFLAGS += -I$(MEGADRIVE_MODE_DIR)/core -I$(MEGADRIVE_MODE_DIR)/core/m68k -I$(MEGADRIVE_MODE_DIR)/core/audio
+FLAGS += -DHAVE_YM3438_CORE
+SOURCES_C += $(MEGADRIVE_MODE_DIR)/core/m68k/m68kcpu.c \
+		$(MEGADRIVE_MODE_DIR)/core/audio/ym3438.c \
+		$(MEGADRIVE_MODE_DIR)/core/audio/sn76496.c \
+		$(MEGADRIVE_MODE_DIR)/core/core.c
+
 ifeq ($(HAVE_CHD), 1)
 ifneq ($(SYSTEM_LIBCHDR), 1)
 ifeq ($(SYSTEM_ZLIB), 1)

@@ -294,6 +294,15 @@ extern void md_set_disc_loader(int (*loader)(const char *path));
 extern int md_scd_load_disc(const char *path);
 extern void md_load_bios(const unsigned char *data, int size);
 extern int scd_bridge_load_disc(const char *path);
+extern void md_set_button(int player, int button, int pressed);
+/* Diagnostic-only, real functions added in core.c (not a struct type-pun
+ * of the real m68ki_cpu_core globals -- those aren't safe to redeclare
+ * with a fake layout here, and core.c already has the real m68k.h
+ * included). Same technique already used investigating the earlier real
+ * MAIN/SUB comm-mailbox bug (mapping stuck PCs back to real ELF
+ * symbols). */
+extern unsigned int md_debug_main_pc(void);
+extern unsigned int md_debug_sub_pc(void);
 
 static uint32_t md_out_rgba[320 * 224];
 static int md_out_w = 320, md_out_h = 224;
@@ -373,16 +382,13 @@ short *md_web_audio_ptr(void) { return md_audio_ptr(); }
 EMSCRIPTEN_KEEPALIVE
 int md_web_audio_samples(void) { return md_out_audio_samples; }
 
-/* Real hardware fact: MegaDriveMode has no controller peripheral emulated
- * yet (see core/core.c's own header comment) -- a real no-op, not a
- * missing feature hidden behind a fake success return. cores.js's own
- * bindCore() calls this unconditionally, so it has to exist. */
+/* Real standard 3-button controller port now emulated in core.c's own
+ * bank_a1_read8/write8 (see md_set_button()'s own header comment there
+ * for the real button-index-to-pin bit layout) -- no longer a no-op. */
 EMSCRIPTEN_KEEPALIVE
 void md_web_set_button(int player, int button, int pressed)
 {
-	(void)player;
-	(void)button;
-	(void)pressed;
+	md_set_button(player, button, pressed);
 }
 
 /* Sega CD variant of "Modo Mega Drive" -- separate exported prefix
@@ -453,3 +459,14 @@ int md_web_cd_audio_samples(void) { return md_web_audio_samples(); }
 
 EMSCRIPTEN_KEEPALIVE
 void md_web_cd_set_button(int player, int button, int pressed) { md_web_set_button(player, button, pressed); }
+
+/* Diagnostic-only, TEMPORARY exports -- not part of this project's real
+ * product API, just a quick way to get ground truth (Main/Sub-CPU PC)
+ * from the browser while investigating whether real simulated pad input
+ * gets SpartoDiska's boot past its splash screen. Safe to remove once
+ * that investigation is done. */
+EMSCRIPTEN_KEEPALIVE
+unsigned int md_web_cd_debug_main_pc(void) { return md_debug_main_pc(); }
+
+EMSCRIPTEN_KEEPALIVE
+unsigned int md_web_cd_debug_sub_pc(void) { return md_debug_sub_pc(); }

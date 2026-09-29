@@ -289,6 +289,11 @@ extern void md_run_frame(void);
 extern int md_generate_audio(void);
 extern short *md_audio_ptr(void);
 extern unsigned int *md_framebuffer_ptr(int *width, int *height);
+extern void md_set_scd_mode(int enabled);
+extern void md_set_disc_loader(int (*loader)(const char *path));
+extern int md_scd_load_disc(const char *path);
+extern void md_load_bios(const unsigned char *data, int size);
+extern int scd_bridge_load_disc(const char *path);
 
 static uint32_t md_out_rgba[320 * 224];
 static int md_out_w = 320, md_out_h = 224;
@@ -379,3 +384,72 @@ void md_web_set_button(int player, int button, int pressed)
 	(void)button;
 	(void)pressed;
 }
+
+/* Sega CD variant of "Modo Mega Drive" -- separate exported prefix
+ * (md_web_cd_*) so cores.js's own generic per-prefix bindCore() can offer
+ * it as its own entry in CORES (needsBios/isCd true, unlike the plain
+ * cartridge "megadrive" entry above), while still driving the exact same
+ * underlying md_* engine and its cartridge-mode-shared md_out_rgba/
+ * md_out_w/md_out_h/md_out_audio_samples statics above -- only one "Modo
+ * Mega Drive" instance is ever loaded per WASM module (cores.js
+ * re-instantiates a fresh Module per core switch, see its own comment on
+ * why), so reusing those statics here isn't a real conflict. Real
+ * disc-reading hook (scd_bridge_load_disc(), in MegaDriveMode/core/scd/
+ * disc_bridge.c) pulls in Saturn's own real mednafen/cdrom chain,
+ * already archived into saturn.a for the real Saturn core above -- see
+ * this directory's build.sh for the extra disc.c/disc_bridge.c sources
+ * and -I path this needs. */
+EMSCRIPTEN_KEEPALIVE
+int md_web_cd_init(void)
+{
+	md_set_scd_mode(1);
+	md_set_disc_loader(scd_bridge_load_disc);
+	md_init();
+	return 1;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int md_web_cd_load_bios(const uint8_t *data, int size)
+{
+	md_load_bios(data, size);
+	return 1;
+}
+
+/* Real, established convention this project's other CD cores already use
+ * (see saturn_load_cd()/jaguar_load_cd() and cores.js's own loadCd() --
+ * `cuePath` is a path already written into this module's Emscripten FS by
+ * main.js's loadCdImage(), NOT raw bytes). scd_bridge_load_disc() (via
+ * md_scd_load_disc()'s pluggable hook) opens it through Saturn's own real
+ * CDIF_Open(), so both a real .cue+.bin set and a real .chd work here
+ * exactly like they do for the Saturn/PS1/Dreamcast cores already. */
+EMSCRIPTEN_KEEPALIVE
+int md_web_cd_load_cd(const char *cue_path)
+{
+	int ok = md_scd_load_disc(cue_path);
+	if (ok) md_reset();
+	return ok;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void md_web_cd_run_frame(void) { md_web_run_frame(); }
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t *md_web_cd_framebuffer_ptr(void) { return md_web_framebuffer_ptr(); }
+
+EMSCRIPTEN_KEEPALIVE
+int md_web_cd_framebuffer_width(void) { return md_web_framebuffer_width(); }
+
+EMSCRIPTEN_KEEPALIVE
+int md_web_cd_framebuffer_height(void) { return md_web_framebuffer_height(); }
+
+EMSCRIPTEN_KEEPALIVE
+int md_web_cd_framebuffer_len(void) { return md_web_framebuffer_len(); }
+
+EMSCRIPTEN_KEEPALIVE
+short *md_web_cd_audio_ptr(void) { return md_web_audio_ptr(); }
+
+EMSCRIPTEN_KEEPALIVE
+int md_web_cd_audio_samples(void) { return md_web_audio_samples(); }
+
+EMSCRIPTEN_KEEPALIVE
+void md_web_cd_set_button(int player, int button, int pressed) { md_web_set_button(player, button, pressed); }

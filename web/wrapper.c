@@ -308,6 +308,8 @@ extern unsigned int md_debug_cdd_last_cmd(void);
 extern unsigned int md_debug_cdd_process_count(void);
 extern unsigned int md_debug_sub_cycles(void);
 extern unsigned int md_debug_sub_d3(void);
+extern unsigned int md_debug_scd_ien(void);
+extern unsigned int md_debug_scd_pending(void);
 
 static uint32_t md_out_rgba[320 * 224];
 static int md_out_w = 320, md_out_h = 224;
@@ -490,3 +492,9 @@ unsigned int md_web_cd_debug_sub_cycles(void) { return md_debug_sub_cycles(); }
 
 EMSCRIPTEN_KEEPALIVE
 unsigned int md_web_cd_debug_sub_d3(void) { return md_debug_sub_d3(); }
+
+EMSCRIPTEN_KEEPALIVE
+unsigned int md_web_cd_debug_scd_ien(void) { return md_debug_scd_ien(); }
+
+EMSCRIPTEN_KEEPALIVE
+unsigned int md_web_cd_debug_scd_pending(void) { return md_debug_scd_pending(); }

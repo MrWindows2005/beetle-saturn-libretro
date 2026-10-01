@@ -308,10 +308,16 @@ extern unsigned int md_debug_cdd_last_cmd(void);
 extern unsigned int md_debug_cdd_process_count(void);
 extern unsigned int md_debug_sub_cycles(void);
 extern unsigned int md_debug_sub_d3(void);
+extern unsigned int md_debug_sub_d2(void);
 extern unsigned int md_debug_scd_ien(void);
 extern unsigned int md_debug_scd_pending(void);
 extern unsigned int md_debug_cdc_head0(void);
 extern unsigned int md_debug_cdc_head1(void);
+extern unsigned int md_debug_cdc_edt(void);
+extern unsigned int md_debug_cdc_dbc(void);
+extern unsigned int md_debug_cdc_dac(void);
+extern unsigned int md_debug_cdc_dest(void);
+extern unsigned int md_debug_cdc_sector_size(void);
 
 static uint32_t md_out_rgba[320 * 224];
 static int md_out_w = 320, md_out_h = 224;
@@ -496,6 +502,9 @@ EMSCRIPTEN_KEEPALIVE
 unsigned int md_web_cd_debug_sub_d3(void) { return md_debug_sub_d3(); }
 
 EMSCRIPTEN_KEEPALIVE
+unsigned int md_web_cd_debug_sub_d2(void) { return md_debug_sub_d2(); }
+
+EMSCRIPTEN_KEEPALIVE
 unsigned int md_web_cd_debug_scd_ien(void) { return md_debug_scd_ien(); }
 
 EMSCRIPTEN_KEEPALIVE
@@ -506,3 +515,18 @@ unsigned int md_web_cd_debug_cdc_head0(void) { return md_debug_cdc_head0(); }
 
 EMSCRIPTEN_KEEPALIVE
 unsigned int md_web_cd_debug_cdc_head1(void) { return md_debug_cdc_head1(); }
+
+EMSCRIPTEN_KEEPALIVE
+unsigned int md_web_cd_debug_cdc_edt(void) { return md_debug_cdc_edt(); }
+
+EMSCRIPTEN_KEEPALIVE
+unsigned int md_web_cd_debug_cdc_dbc(void) { return md_debug_cdc_dbc(); }
+
+EMSCRIPTEN_KEEPALIVE
+unsigned int md_web_cd_debug_cdc_dac(void) { return md_debug_cdc_dac(); }
+
+EMSCRIPTEN_KEEPALIVE
+unsigned int md_web_cd_debug_cdc_dest(void) { return md_debug_cdc_dest(); }
+
+EMSCRIPTEN_KEEPALIVE
+unsigned int md_web_cd_debug_cdc_sector_size(void) { return md_debug_cdc_sector_size(); }

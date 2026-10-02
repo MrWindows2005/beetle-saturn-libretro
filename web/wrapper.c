@@ -309,6 +309,10 @@ extern unsigned int md_debug_cdd_process_count(void);
 extern unsigned int md_debug_sub_cycles(void);
 extern unsigned int md_debug_sub_d3(void);
 extern unsigned int md_debug_sub_d2(void);
+extern unsigned int md_debug_sub_d4(void);
+extern unsigned int md_debug_dma_addr(void);
+extern unsigned int md_debug_z80_bus_req(void);
+extern unsigned int md_debug_z80_reset_line(void);
 extern unsigned int md_debug_scd_ien(void);
 extern unsigned int md_debug_scd_pending(void);
 extern unsigned int md_debug_cdc_head0(void);
@@ -503,6 +507,18 @@ unsigned int md_web_cd_debug_sub_d3(void) { return md_debug_sub_d3(); }
 
 EMSCRIPTEN_KEEPALIVE
 unsigned int md_web_cd_debug_sub_d2(void) { return md_debug_sub_d2(); }
+
+EMSCRIPTEN_KEEPALIVE
+unsigned int md_web_cd_debug_sub_d4(void) { return md_debug_sub_d4(); }
+
+EMSCRIPTEN_KEEPALIVE
+unsigned int md_web_cd_debug_dma_addr(void) { return md_debug_dma_addr(); }
+
+EMSCRIPTEN_KEEPALIVE
+unsigned int md_web_cd_debug_z80_bus_req(void) { return md_debug_z80_bus_req(); }
+
+EMSCRIPTEN_KEEPALIVE
+unsigned int md_web_cd_debug_z80_reset_line(void) { return md_debug_z80_reset_line(); }
 
 EMSCRIPTEN_KEEPALIVE
 unsigned int md_web_cd_debug_scd_ien(void) { return md_debug_scd_ien(); }

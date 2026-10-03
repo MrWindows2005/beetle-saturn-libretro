@@ -98,6 +98,9 @@ static uint8_t SCU_SSH2VectorFetch(void);
  * decl in ss_init.h; definition lives in ss.c. */
 
 SH7095 CPU[2];
+uint32_t ss_dbg[8]; /* diagnostic-only: [0]=SCU DSP program-port writes, [1]=PPAF writes, [2]=last PPAF value */
+uint32_t ss_debug_get(int i) { return ss_dbg[i & 7]; }
+uint32_t ss_debug_pc(int cpu) { return CPU[cpu & 1].PC; }
 
 MDFN_COLD void SH7095_ConstructAll(void)
 {

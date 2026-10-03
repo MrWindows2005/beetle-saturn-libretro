@@ -716,7 +716,7 @@ static INLINE void SCU_RegRW_DB_u8_W1(uint32_t A, uint32_t* DB)
 	break;
 
    case 0x80:
-	SCU_UpdateDSP(SH7095_mem_timestamp);
+	ss_dbg[1]++; ss_dbg[2] = *DB; SCU_UpdateDSP(SH7095_mem_timestamp);
 
 	if(*DB & (1U << 25))	// Pause start
 	 DSP.State |= STATE_MASK_PAUSE;
@@ -770,7 +770,7 @@ static INLINE void SCU_RegRW_DB_u8_W1(uint32_t A, uint32_t* DB)
    case 0x84:
 	if(!DSPS_IsRunning(&DSP))
 	{
-	 const uint8_t slot = DSP.PC++;
+	 ss_dbg[0]++; const uint8_t slot = DSP.PC++;
 	 DSP.ProgRAM[slot] = DSP_DecodeSlotInstruction(slot, *DB, false);
 	}
 	break;
@@ -1075,7 +1075,7 @@ static INLINE void SCU_RegRW_DB_u16_W1(uint32_t A, uint32_t* DB)
 	break;
 
    case 0x80:
-	SCU_UpdateDSP(SH7095_mem_timestamp);
+	ss_dbg[1]++; ss_dbg[2] = *DB; SCU_UpdateDSP(SH7095_mem_timestamp);
 
 	if(*DB & (1U << 25))	// Pause start
 	 DSP.State |= STATE_MASK_PAUSE;
@@ -1128,7 +1128,7 @@ static INLINE void SCU_RegRW_DB_u16_W1(uint32_t A, uint32_t* DB)
 
    case 0x84:
 	if(!DSPS_IsRunning(&DSP))
-	 DSP.ProgRAM[DSP.PC++] = DSP_DecodeInstruction(*DB, false);
+	 ss_dbg[0]++; DSP.ProgRAM[DSP.PC++] = DSP_DecodeInstruction(*DB, false);
 	break;
 
    case 0x88:
@@ -1431,7 +1431,7 @@ static INLINE void SCU_RegRW_DB_u32_W1(uint32_t A, uint32_t* DB)
 	break;
 
    case 0x80:
-	SCU_UpdateDSP(SH7095_mem_timestamp);
+	ss_dbg[1]++; ss_dbg[2] = *DB; SCU_UpdateDSP(SH7095_mem_timestamp);
 
 	if(*DB & (1U << 25))	// Pause start
 	 DSP.State |= STATE_MASK_PAUSE;
@@ -1484,7 +1484,7 @@ static INLINE void SCU_RegRW_DB_u32_W1(uint32_t A, uint32_t* DB)
 
    case 0x84:
 	if(!DSPS_IsRunning(&DSP))
-	 DSP.ProgRAM[DSP.PC++] = DSP_DecodeInstruction(*DB, false);
+	 ss_dbg[0]++; DSP.ProgRAM[DSP.PC++] = DSP_DecodeInstruction(*DB, false);
 	break;
 
    case 0x88:
@@ -3927,7 +3927,7 @@ void DSP_FinishPRAMDMA(void)
 
  for(uint32_t i = 0; i < DSP.PRAMDMABufCount; i++)
  {
-  const uint8_t slot = DSP.PC++;
+  ss_dbg[0]++; const uint8_t slot = DSP.PC++;
   DSP.ProgRAM[slot] = DSP_DecodeSlotInstruction(slot, DSP.PRAMDMABuf[i & 0xFF], false);
  }
 

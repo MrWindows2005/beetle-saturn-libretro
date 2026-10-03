@@ -139,7 +139,17 @@ static bool environment_cb_fn(unsigned cmd, void *data)
 		 * this fork's own compiled-in defaults (var.value already starts
 		 * NULL'd by libretro.c before each of these calls) -- region stays
 		 * "auto" (detected from the disc itself), which is exactly the
-		 * real-hardware behavior we want, not something to override. */
+		 * real-hardware behavior we want, not something to override.
+		 *
+		 * Exception: there is no native code generation on wasm, so the
+		 * SCU-DSP / SCSP-DSP JIT switches (default "enabled" in
+		 * libretro_settings.c) are turned off explicitly. */
+		struct retro_variable *v = (struct retro_variable *)data;
+		if (v && v->key && (!strcmp(v->key, "beetle_saturn_jit_scu") || !strcmp(v->key, "beetle_saturn_jit_scsp")))
+		{
+			v->value = "disabled";
+			return true;
+		}
 		return false;
 	}
 	case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
@@ -566,3 +576,9 @@ void md_web_cd_debug_trace_start(unsigned int p) { md_debug_trace_start(p); }
 unsigned int md_web_cd_debug_trace(int i) { return md_debug_trace(i); }
 unsigned int md_web_cd_debug_cdc_log(int i) { return md_debug_cdc_log(i); }
 unsigned int md_web_cd_debug_cdc_last_host_dac(void) { return md_debug_cdc_last_host_dac(); }
+
+/* Diagnostic-only: SH-2 program counters and SCU-DSP port-write counters (see mednafen/ss/ss.c ss_dbg). */
+extern uint32_t ss_debug_pc(int cpu);
+extern uint32_t ss_debug_get(int i);
+EMSCRIPTEN_KEEPALIVE uint32_t saturn_debug_pc(int cpu) { return ss_debug_pc(cpu); }
+EMSCRIPTEN_KEEPALIVE uint32_t saturn_debug_get(int i) { return ss_debug_get(i); }

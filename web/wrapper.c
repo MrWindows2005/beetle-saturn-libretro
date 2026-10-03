@@ -150,6 +150,15 @@ static bool environment_cb_fn(unsigned cmd, void *data)
 			v->value = "disabled";
 			return true;
 		}
+		/* The core's own documented "recommended" SH-2 sync window: the two
+		 * CPUs stop alternating every single instruction (~15% faster, still
+		 * full speed per CPU). Wasm has far less headroom than a desktop
+		 * build, so take it by default. */
+		if (v && v->key && !strcmp(v->key, "beetle_saturn_sh2_interleave"))
+		{
+			v->value = "8";
+			return true;
+		}
 		return false;
 	}
 	case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
